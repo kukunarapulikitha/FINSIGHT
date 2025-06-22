@@ -1,0 +1,14 @@
+streamlit
+pandas
+plotly
+python-dotenv
+langchain>=0.1.5
+langgraph
+langchain-core
+langchain-openai
+langchain-anthropic
+langchain-google-genai
+python-dotenv==1.0.0
+yfinance==0.2.33
+requests==2.31.0
+PyPDF2==3.0.1
