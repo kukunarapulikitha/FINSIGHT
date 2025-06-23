@@ -15,8 +15,4 @@ requests==2.31.0
 PyPDF2==3.0.1
 faiss-cpu
 python-dateutil
-<<<<<<< HEAD
 langchain-community
-=======
-langchain-community
->>>>>>> a8cd5bc51b28576639c3d3973a76c70122f46341
