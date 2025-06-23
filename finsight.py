@@ -35,9 +35,314 @@ from langchain.schema import Document
 # Add this import after your other imports
 from llm_evaluation import show_llm_evaluation_page, LLM_PROFILES
 
+import numpy as np
 # Load environment variables
 load_dotenv()
 
+def format_currency(amount: float, decimals: int = 2) -> str:
+    """Format currency values properly with proper spacing"""
+    if amount is None or (isinstance(amount, float) and np.isnan(amount)):
+        return "N/A"
+    
+    # Ensure amount is a number
+    try:
+        amount = float(amount)
+    except:
+        return "N/A"
+    
+    if amount >= 1e9:
+        return f"${amount/1e9:.{decimals}f}B"
+    elif amount >= 1e6:
+        return f"${amount/1e6:.{decimals}f}M"
+    elif amount >= 1e3:
+        return f"${amount/1e3:.{decimals}f}K"
+    else:
+        return f"${amount:.{decimals}f}"
+
+
+def clean_response_text(text: str) -> str:
+    """Clean and format response text for proper display"""
+    if not text:
+        return text
+    
+    import re
+    
+    # Fix currency amount patterns: $107.0million -> $107.0 million
+    text = re.sub(r'\$(\d+(?:,\d{3})*(?:\.\d+)?)(million|billion|thousand|M|B|K)', r'$\1 \2', text, flags=re.IGNORECASE)
+    
+    # First, fix the specific pattern causing issues: $numberText should be $number Text
+    # This regex looks for currency followed by numbers then letters without space
+    text = re.sub(r'\$(\d+(?:,\d{3})*(?:\.\d+)?[BMK]?)([A-Za-z])', r'$\1 \2', text)
+    
+    # Fix merged bold markers: **word** should have spaces
+    # First, ensure spaces around bold markers
+    text = re.sub(r'(\S)\*\*(\S)', r'\1 **\2', text)
+    text = re.sub(r'(\S)\*\*', r'\1 **', text)
+    text = re.sub(r'\*\*(\S)', r'** \1', text)
+    
+    # Fix percentage patterns: number% word should be number% word
+    text = re.sub(r'(\d+(?:\.\d+)?%)([A-Za-z])', r'\1 \2', text)
+    
+    # Fix patterns like: of0.0 -> of 0.0
+    text = re.sub(r'([a-z])(\d+(?:\.\d+)?)', r'\1 \2', text, flags=re.IGNORECASE)
+    
+    # Fix patterns like: marginof10.0 -> margin of 10.0
+    text = re.sub(r'([a-z])(of)(\d+)', r'\1 \2 \3', text, flags=re.IGNORECASE)
+    
+    # Fix patterns like: 4,242Mwith -> 4,242M with
+    text = re.sub(r'(\d+(?:,\d{3})*(?:\.\d+)?[BMK])([a-z])', r'\1 \2', text)
+    
+    # Fix merged words: millionand -> million and
+    text = re.sub(r'(million|billion|thousand)(and|with|or|for)', r'\1 \2', text, flags=re.IGNORECASE)
+    
+    # Remove duplicate asterisks (e.g., ***** -> **)
+    text = re.sub(r'\*{3,}', '**', text)
+    
+    # Clean up any remaining stray asterisks (single asterisks not part of bold)
+    text = re.sub(r'(?<!\*)\*(?!\*)', ' ', text)
+    
+    # Ensure proper spacing after punctuation
+    text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
+    
+    # Fix line breaks
+    text = text.replace('\\n', '\n')
+    
+    # Normalize whitespace
+    text = re.sub(r' +', ' ', text)  # Multiple spaces to single space
+    text = re.sub(r'\n{3,}', '\n\n', text)  # Multiple newlines to double
+    
+    return text.strip()
+
+
+def clean_list_item(text: str) -> str:
+    """Clean individual list items, removing leading asterisks and formatting"""
+    if not text:
+        return text
+    
+    import re
+    
+    # Remove leading asterisks, numbers, periods, and whitespace
+    text = re.sub(r'^[\*\s\d\.]+', '', text.strip())
+    
+    # Also clean using the main clean function
+    text = clean_response_text(text)
+    
+    return text.strip()
+def format_response_for_display(response_parts: List[str], response_mode: str, query_intent: str, 
+                               company: str, ticker: str, insights: Dict, kpis: Dict, 
+                               risk_assessment: Dict, market_data: Dict, parsed_data: Dict) -> str:
+    """Format the complete response with proper styling"""
+    
+    formatted_parts = []
+    
+    if response_mode == "concise":
+        # CONCISE MODE - Clean, structured format
+        
+        # Main answer with proper formatting
+        if insights.get("query_specific_answer"):
+            answer = clean_response_text(insights["query_specific_answer"])
+            formatted_parts.append(f"### 📌 {answer}\n")
+        
+        # For earnings/financial analysis queries, show key metrics
+        elif query_intent in ["document_analysis", "general_analysis"] and "earnings" in query.lower():
+            # Format the earnings summary properly
+            revenue_val = parsed_data.get('revenue', 0)
+            revenue_str = format_currency(revenue_val)
+            net_margin_val = kpis.get('net_margin', 0)
+            pe_ratio_val = kpis.get('price_to_earnings', 0)
+            
+            answer = f"{company}'s earnings in {period} show a revenue of {revenue_str} with a net margin of {net_margin_val:.1f}% and P/E ratio of {pe_ratio_val:.1f}."
+            formatted_parts.append(f"### 📌 {answer}\n")
+        
+        # Investment decision
+        if insights.get("investment_decision") and query_intent == "investment_decision":
+            decision = insights["investment_decision"]
+            emoji = {"BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "WAIT": "⏸️"}.get(decision, "")
+            formatted_parts.append(f"Decision: {emoji} {decision}\n")
+        
+        # Current price
+        if market_data.get('price') and query_intent == "investment_decision":
+            formatted_parts.append(f"Current Price: {format_currency(market_data['price'])}")
+        
+        # Risk level
+        if query_intent in ["risk_assessment", "investment_decision"]:
+            risk_score = risk_assessment.get('overall_risk_score', 0)
+            risk_level = risk_assessment.get('risk_level', 'Unknown')
+            formatted_parts.append(f"**Risk Level:** {risk_level} ({risk_score:.0f}/100)\n")
+        
+        # Key metrics in a clean table format
+        if query_intent in ["investment_decision", "general_analysis", "document_analysis"]:
+            formatted_parts.append("#### Key Metrics")
+            formatted_parts.append("| Metric | Value |")
+            formatted_parts.append("|--------|-------|")
+            
+            # Safely format each metric
+            net_margin = kpis.get('net_margin', 0)
+            pe_ratio = kpis.get('price_to_earnings', 0)
+            
+            formatted_parts.append(f"| Net Margin | {net_margin:.1f}% |")
+            formatted_parts.append(f"| P/E Ratio | {pe_ratio:.1f} |")
+            
+            if market_data.get('52_week_high') and market_data.get('52_week_low'):
+                range_str = f"{format_currency(market_data['52_week_low'])} - {format_currency(market_data['52_week_high'])}"
+                formatted_parts.append(f"| 52-Week Range | {range_str} |")
+            formatted_parts.append("")
+        
+        # Concerns with bullet points
+        if insights.get("key_concerns") and len(insights["key_concerns"]) > 0:
+            formatted_parts.append("#### ⚠️ Concerns")
+            for concern in insights["key_concerns"][:2]:
+                formatted_parts.append(f"- {concern}")
+            formatted_parts.append("")
+        
+        # Recommendations
+        if insights.get("recommendations"):
+            formatted_parts.append("#### 💡 What to do")
+            for rec in insights["recommendations"][:2]:
+                formatted_parts.append(f"- {rec}")
+            formatted_parts.append("")
+        
+        # Volatility warning
+        volatile_stocks = ['TSLA', 'GME', 'AMC', 'COIN', 'RIOT', 'MARA', 'PLTR', 'NIO', 'RIVN']
+        if ticker in volatile_stocks and query_intent == "investment_decision":
+            formatted_parts.append("*⚠️ Note: This stock is known for high volatility*\n")
+    
+    else:
+        # DETAILED MODE - Professional format with sections
+        
+        # Header
+        formatted_parts.append(f"# {company} ({ticker}) Financial Analysis\n")
+        
+        # Investment Overview Box
+        if query_intent == "investment_decision":
+            formatted_parts.append("## 📊 Investment Overview")
+            formatted_parts.append("```")
+            if market_data.get('price'):
+                formatted_parts.append(f"Current Price:  {format_currency(market_data['price'])}")
+            if market_data.get('market_cap'):
+                formatted_parts.append(f"Market Cap:     {format_currency(market_data['market_cap'])}")
+            if market_data.get('52_week_high') and market_data.get('52_week_low'):
+                current = market_data.get('price', 0)
+                high = market_data['52_week_high']
+                low = market_data['52_week_low']
+                pct_from_high = ((current - high) / high * 100) if high > 0 else 0
+                formatted_parts.append(f"52-Week Range:  {format_currency(low)} - {format_currency(high)}")
+                formatted_parts.append(f"From High:      {pct_from_high:+.1f}%")
+            formatted_parts.append("```\n")
+        
+
+        # Analysis section
+        if insights.get("query_specific_answer"):
+            formatted_parts.append("## 📈 Analysis")
+            # Clean the answer text before adding it
+            answer = insights["query_specific_answer"]
+            
+            # Apply the same cleaning as in concise mode
+            answer = clean_response_text(answer)
+            
+            # Additional cleaning for common patterns in financial text
+            import re
+            
+            # Fix currency patterns: $107.0million -> $107.0 million
+            answer = re.sub(r'\$(\d+(?:\.\d+)?)(million|billion|thousand)', r'$\1 \2', answer, flags=re.IGNORECASE)
+            
+            # Fix percentage patterns: of10.0% -> of 10.0%
+            answer = re.sub(r'of(\d+(?:\.\d+)?%)', r'of \1', answer)
+            
+            # Fix merged words with numbers: margin10.0 -> margin 10.0
+            answer = re.sub(r'([a-z])(\d+(?:\.\d+)?)', r'\1 \2', answer, flags=re.IGNORECASE)
+            
+            # Fix merged percentage with words: 10.0%and -> 10.0% and
+            answer = re.sub(r'(\d+(?:\.\d+)?%)([a-z])', r'\1 \2', answer, flags=re.IGNORECASE)
+            
+            # Remove any stray asterisks
+            answer = re.sub(r'(?<!\*)\*(?!\*)', ' ', answer)
+            
+            formatted_parts.append(f"{answer}\n")
+
+        
+        # Investment Decision
+        if insights.get("investment_decision") and query_intent == "investment_decision":
+            decision = insights["investment_decision"]
+            emoji = {"BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "WAIT": "⏸️"}.get(decision, "")
+            formatted_parts.append(f"## {emoji} Investment Decision: {decision}")
+            
+            # Add reasoning
+            if decision == "BUY":
+                formatted_parts.append("*Strong fundamentals support accumulation at current levels.*")
+            elif decision == "HOLD":
+                formatted_parts.append("*Mixed signals suggest maintaining current position while monitoring developments.*")
+            elif decision == "SELL":
+                formatted_parts.append("*Risk factors outweigh potential rewards at current valuation.*")
+            else:
+                formatted_parts.append("*Unclear trends warrant patience before taking a position.*")
+            formatted_parts.append("")
+        
+        # Financial Metrics Table
+        if query_intent in ["investment_decision", "general_analysis"]:
+            formatted_parts.append("## 📊 Financial Metrics")
+            formatted_parts.append("| Metric | Value |")
+            formatted_parts.append("|--------|-------|")
+            formatted_parts.append(f"| Revenue | {format_currency(parsed_data.get('revenue', 0))} |")
+            formatted_parts.append(f"| Gross Margin | {kpis.get('gross_margin', 0):.1f}% |")
+            formatted_parts.append(f"| Net Margin | {kpis.get('net_margin', 0):.1f}% |")
+            formatted_parts.append(f"| P/E Ratio | {kpis.get('price_to_earnings', 0):.1f} |")
+            formatted_parts.append(f"| ROE | {kpis.get('return_on_equity', 0):.1f}% |")
+            formatted_parts.append(f"| Debt/Equity | {kpis.get('debt_to_equity', 0):.2f} |")
+            formatted_parts.append("")
+        
+        # Strengths and Concerns in columns
+        if insights.get("key_strengths") or insights.get("key_concerns"):
+            formatted_parts.append("## 💪 Strengths vs ⚠️ Concerns")
+            formatted_parts.append("")
+            formatted_parts.append("### Strengths")
+            if insights.get("key_strengths"):
+                for strength in insights["key_strengths"]:
+                    # Clean the strength text
+                    clean_strength = clean_list_item(strength)
+                    formatted_parts.append(f"- ✅ {clean_strength}")
+            formatted_parts.append("")
+            
+            formatted_parts.append("### Concerns")
+            if insights.get("key_concerns"):
+                for concern in insights["key_concerns"]:
+                    # Clean the concern text
+                    clean_concern = clean_list_item(concern)
+                    formatted_parts.append(f"- ⚠️ {clean_concern}")
+            formatted_parts.append("")
+
+        # Investment Strategy
+        if insights.get("recommendations"):
+            formatted_parts.append("## 🎯 Investment Strategy")
+            for i, rec in enumerate(insights["recommendations"], 1):
+                # Clean the recommendation text by removing any existing numbering and asterisks
+                clean_rec = rec.strip()
+                
+                # Remove patterns like "** 1. **", "**1.**", "1.", "1)", etc. from the beginning
+                import re
+                clean_rec = re.sub(r'^[\*\s]*\d+[\.\)]\s*[\*\s]*', '', clean_rec)
+                
+                # Remove any remaining leading/trailing asterisks
+                clean_rec = re.sub(r'^[\*\s]+|[\*\s]+$', '', clean_rec)
+                
+                # Remove internal double asterisks that should be formatting
+                clean_rec = re.sub(r'\*\*\s*', '', clean_rec)
+                clean_rec = re.sub(r'\s*\*\*', '', clean_rec)
+                
+                # Format as a clean numbered list
+                formatted_parts.append(f"{i}. {clean_rec}")
+            formatted_parts.append("")
+        
+        # Outlook sections
+        if insights.get("market_position"):
+            formatted_parts.append("## 🏆 Market Position")
+            formatted_parts.append(f"{insights['market_position']}\n")
+        
+        if insights.get("future_outlook"):
+            formatted_parts.append("## 🔮 Future Outlook")
+            formatted_parts.append(f"{insights['future_outlook']}\n")
+    
+    return "\n".join(formatted_parts)
 # Add this after your imports
 class DateTimeEncoder(json.JSONEncoder):
     """JSON encoder that handles datetime and pandas Timestamp objects"""
@@ -62,57 +367,139 @@ def discover_company_info(company_query: str):
     Discover company ticker and CIK using various methods
     Returns: dict with ticker, full_name, cik, and confidence score
     """
+    # Common company name to ticker mappings
+    COMPANY_TICKER_MAP = {
+        # Banks and Financial Services
+        "state street": "STT",
+        "state street corporation": "STT",
+        "state street corp": "STT",
+        "jpmorgan": "JPM",
+        "jp morgan": "JPM",
+        "jpmorgan chase": "JPM",
+        "bank of america": "BAC",
+        "wells fargo": "WFC",
+        "goldman sachs": "GS",
+        "morgan stanley": "MS",
+        "charles schwab": "SCHW",
+        
+        # Tech Companies
+        "snowflake": "SNOW",
+        "palantir": "PLTR",
+        "servicenow": "NOW",
+        "service now": "NOW",
+        "salesforce": "CRM",
+        "spotify": "SPOT",
+        "uber": "UBER",
+        "lyft": "LYFT",
+        "airbnb": "ABNB",
+        "coinbase": "COIN",
+        "robinhood": "HOOD",
+        
+        # Big Tech
+        "apple": "AAPL",
+        "microsoft": "MSFT",
+        "google": "GOOGL",
+        "alphabet": "GOOGL",
+        "amazon": "AMZN",
+        "meta": "META",
+        "facebook": "META",
+        "netflix": "NFLX",
+        "tesla": "TSLA",
+        "nvidia": "NVDA",
+        
+        # Other Major Companies
+        "walmart": "WMT",
+        "disney": "DIS",
+        "coca cola": "KO",
+        "coca-cola": "KO",
+        "pepsi": "PEP",
+        "pepsico": "PEP",
+        "mcdonald's": "MCD",
+        "mcdonalds": "MCD",
+        "starbucks": "SBUX",
+        "nike": "NKE",
+        "intel": "INTC",
+        "amd": "AMD",
+        "advanced micro devices": "AMD"
+    }
+    
     try:
-        # Method 1: Try direct ticker lookup
-        ticker_test = company_query.upper().strip()
-        try:
-            stock = yf.Ticker(ticker_test)
-            info = stock.info
-            if info and 'longName' in info:
-                return {
-                    "ticker": ticker_test,
-                    "full_name": info.get('longName', company_query),
-                    "cik": None,  # Will search for CIK separately
-                    "confidence": 0.9,
-                    "method": "direct_ticker"
-                }
-        except:
-            pass
-        
-        # Method 2: Search using yfinance search functionality
-        # Note: yfinance doesn't have built-in search, so we'll use a workaround
-        # Try common variations
-        possible_tickers = []
-        
-        # Remove common suffixes
+        # Clean the query
         clean_query = company_query.lower().strip()
-        for suffix in [' inc', ' corp', ' corporation', ' limited', ' ltd', ' plc', ' sa', ' ag', ' nv', ' se']:
-            clean_query = clean_query.replace(suffix, '')
         
-        # Try the query as-is and with common modifications
-        test_queries = [
-            company_query.upper(),
-            clean_query.upper(),
-            ''.join(clean_query.split()).upper(),  # Remove spaces
-        ]
-        
-        for test_ticker in test_queries:
-            if len(test_ticker) <= 5:  # Most tickers are 1-5 characters
+        # Method 1: Check our mapping first
+        for company_name, ticker in COMPANY_TICKER_MAP.items():
+            if company_name in clean_query or clean_query in company_name:
+                # Verify with yfinance
                 try:
-                    stock = yf.Ticker(test_ticker)
+                    stock = yf.Ticker(ticker)
                     info = stock.info
                     if info and 'longName' in info:
                         return {
-                            "ticker": test_ticker,
+                            "ticker": ticker,
                             "full_name": info.get('longName', company_query),
                             "cik": None,
-                            "confidence": 0.7,
-                            "method": "cleaned_ticker"
+                            "confidence": 0.95,
+                            "method": "known_mapping"
                         }
                 except:
-                    continue
+                    pass
         
-        # Method 3: Use SEC Edgar search API for CIK lookup
+        # Method 2: Try direct ticker lookup (if query is short and uppercase)
+        if len(company_query) <= 5 and company_query.isupper():
+            try:
+                stock = yf.Ticker(company_query)
+                info = stock.info
+                if info and 'longName' in info:
+                    return {
+                        "ticker": company_query,
+                        "full_name": info.get('longName', company_query),
+                        "cik": None,
+                        "confidence": 0.9,
+                        "method": "direct_ticker"
+                    }
+            except:
+                pass
+        
+        # Method 3: Try the query as a ticker (uppercase it)
+        ticker_test = company_query.upper().replace(" ", "")
+        if len(ticker_test) <= 5:
+            try:
+                stock = yf.Ticker(ticker_test)
+                info = stock.info
+                if info and 'longName' in info:
+                    return {
+                        "ticker": ticker_test,
+                        "full_name": info.get('longName', company_query),
+                        "cik": None,
+                        "confidence": 0.8,
+                        "method": "uppercase_ticker"
+                    }
+            except:
+                pass
+        
+        # Method 4: Remove common suffixes and try again
+        for suffix in [' inc', ' corp', ' corporation', ' limited', ' ltd', ' plc', ' sa', ' ag', ' nv', ' se', ' co', '.com']:
+            if clean_query.endswith(suffix):
+                base_name = clean_query[:-len(suffix)].strip()
+                # Check mapping again with base name
+                for company_name, ticker in COMPANY_TICKER_MAP.items():
+                    if base_name in company_name or company_name in base_name:
+                        try:
+                            stock = yf.Ticker(ticker)
+                            info = stock.info
+                            if info and 'longName' in info:
+                                return {
+                                    "ticker": ticker,
+                                    "full_name": info.get('longName', company_query),
+                                    "cik": None,
+                                    "confidence": 0.85,
+                                    "method": "suffix_removed_mapping"
+                                }
+                        except:
+                            pass
+        
+        # Method 5: Use SEC Edgar search API for CIK lookup
         sec_search_url = f"https://www.sec.gov/cgi-bin/browse-edgar?company={company_query}&output=json"
         try:
             response = requests.get(sec_search_url, headers=SEC_HEADERS, timeout=5)
@@ -123,12 +510,12 @@ def discover_company_info(company_query: str):
                     cik = str(match.get('cik', '')).zfill(10)
                     name = match.get('name', company_query)
                     
-                    # Try to find ticker from the name or use ticker lookup services
-                    # This is a simplified approach - in production, you'd use a proper API
+                    # Try to find ticker from SEC data or use a mapping
                     ticker = None
+                    # You could enhance this by maintaining a CIK-to-ticker mapping
                     
                     return {
-                        "ticker": ticker,
+                        "ticker": ticker or company_query.upper()[:10],  # Longer limit for unknown tickers
                         "full_name": name,
                         "cik": cik,
                         "confidence": 0.6,
@@ -137,25 +524,26 @@ def discover_company_info(company_query: str):
         except:
             pass
         
-        # Method 4: Fallback - return the query as-is with low confidence
+        # Method 6: Fallback - but don't truncate to 5 chars
+        # Instead, return the query as-is for the LLM to handle
         return {
-            "ticker": company_query.upper()[:5],  # Truncate to typical ticker length
+            "ticker": company_query.upper().replace(" ", "")[:10],  # Allow up to 10 chars
             "full_name": company_query,
             "cik": None,
-            "confidence": 0.3,
-            "method": "fallback"
+            "confidence": 0.2,  # Very low confidence
+            "method": "fallback",
+            "needs_llm_help": True  # Flag for LLM to help
         }
         
     except Exception as e:
         return {
-            "ticker": company_query.upper()[:5],
+            "ticker": "UNKNOWN",
             "full_name": company_query,
             "cik": None,
             "confidence": 0.1,
             "method": "error",
             "error": str(e)
         }
-
 # Function to search for company CIK if not found
 def search_company_cik(company_name: str, ticker: str = None):
     """Search for company CIK using SEC Edgar database"""
@@ -181,13 +569,13 @@ def search_company_cik(company_name: str, ticker: str = None):
     except Exception:
         return None
 
-# Add function to extract company and period from natural language
+
+
 def extract_query_entities(query: str):
     """Extract company name and time period from natural language query"""
     query_lower = query.lower()
     
     # First, try to identify company from the query
-    # This is now more flexible and will extract any company name
     company_name = None
     
     # Common patterns for company mentions
@@ -198,7 +586,7 @@ def extract_query_entities(query: str):
         company_name = quote_match.group(1)
     
     # Pattern 2: Known company keywords followed by company name
-    company_keywords = ['invest in', 'analyze', 'buy', 'sell', 'about', 'is', 'how is', "what's", 'should i invest in']
+    company_keywords = ['invest in', 'analyze', 'buy', 'sell', 'about', 'is', 'how is', "what's", 'should i invest in', 'earnings of', 'financials of']
     for keyword in company_keywords:
         pattern = rf'{keyword}\s+([A-Z][A-Za-z0-9\s&\.\,\-]+?)(?:\s+(?:stock|shares|company|corp|inc|ltd|limited|good|bad|risky|safe|for|in|a\s|an\s|the\s|\?|$))'
         match = re.search(pattern, query, re.IGNORECASE)
@@ -227,18 +615,24 @@ def extract_query_entities(query: str):
         cap_matches = re.findall(cap_pattern, query)
         for match in cap_matches:
             # Filter out common non-company words
-            if match.lower() not in ['should', 'what', 'how', 'when', 'where', 'why', 'quarter', 'fiscal', 'year']:
+            if match.lower() not in ['should', 'what', 'how', 'when', 'where', 'why', 'quarter', 'fiscal', 'year', 'analyze', 'earnings']:
                 company_name = match
                 break
     
-    # Time period extraction (keep existing logic)
+    # Time period extraction - IMPROVED
     detected_period = None
     current_year = datetime.now().year
     
+    # Check for specific year mentions (e.g., "in 2024", "2024 earnings", "fiscal 2024")
+    year_pattern = r'(?:in\s+|for\s+|fiscal\s+|fy\s*)?(\d{4})(?:\s+earnings|\s+financials|\s+results)?'
+    year_match = re.search(year_pattern, query_lower)
+    if year_match:
+        year = year_match.group(1)
+        detected_period = f"FY {year}"
+    
     # Check for specific quarters
-    quarter_pattern = r'q(\d)\s*(\d{4})'
-    quarter_match = re.search(quarter_pattern, query_lower)
-    if quarter_match:
+    elif re.search(r'q(\d)\s*(\d{4})', query_lower):
+        quarter_match = re.search(r'q(\d)\s*(\d{4})', query_lower)
         detected_period = f"Q{quarter_match.group(1)} {quarter_match.group(2)}"
     
     # Check for year ranges
@@ -251,14 +645,18 @@ def extract_query_entities(query: str):
     elif "this year" in query_lower or "current year" in query_lower:
         detected_period = f"FY {current_year}"
     
-    # Check for fiscal year
-    fy_pattern = r'fy\s*(\d{4})'
-    fy_match = re.search(fy_pattern, query_lower)
-    if fy_match and not detected_period:
+    # Check for quarters without year
+    elif re.search(r'q(\d)(?:\s|$)', query_lower):
+        quarter_match = re.search(r'q(\d)(?:\s|$)', query_lower)
+        # Assume current year for quarter without year
+        detected_period = f"Q{quarter_match.group(1)} {current_year}"
+    
+    # Check for fiscal year pattern
+    elif re.search(r'fy\s*(\d{4})', query_lower):
+        fy_match = re.search(r'fy\s*(\d{4})', query_lower)
         detected_period = f"FY {fy_match.group(1)}"
     
     return company_name, detected_period
-
 # Company Discovery Agent Prompt
 COMPANY_DISCOVERY_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a company discovery agent. Your job is to identify the company being discussed and find its trading information.
@@ -311,6 +709,69 @@ class FinancialAnalysisState(TypedDict):
     company_confidence: float
 
 # Create company discovery agent
+# def create_company_discovery_agent(llm):
+#     """Agent to discover and validate company information"""
+#     def company_discoverer(state: FinancialAnalysisState):
+#         extracted_company = state.get("extracted_company", "")
+        
+#         if not extracted_company:
+#             # If no company extracted, ask the LLM to identify it from the query
+#             extract_prompt = f"Extract the company name from this query: '{state['query']}'. Return only the company name or ticker symbol."
+#             response = llm.invoke([HumanMessage(content=extract_prompt)])
+#             extracted_company = response.content.strip()
+        
+#         # Use discovery function
+#         discovery_results = discover_company_info(extracted_company)
+        
+#         # Get CIK if not found
+#         if not discovery_results.get("cik") and discovery_results.get("ticker"):
+#             cik = search_company_cik(
+#                 discovery_results.get("full_name", extracted_company),
+#                 discovery_results.get("ticker")
+#             )
+#             discovery_results["cik"] = cik
+        
+#         # If low confidence, try to improve with LLM
+#         if discovery_results["confidence"] < 0.7:
+#             prompt = COMPANY_DISCOVERY_PROMPT.format_messages(
+#                 query=state["query"],
+#                 extracted_company=extracted_company,
+#                 discovery_results=json.dumps(discovery_results),
+#                 messages=state["messages"]
+#             )
+            
+#             response = llm.invoke(prompt)
+            
+#             try:
+#                 import re
+#                 json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+#                 if json_match:
+#                     llm_result = json.loads(json_match.group())
+                    
+#                     # Update discovery results with LLM insights
+#                     if llm_result.get("confidence", 0) > discovery_results["confidence"]:
+#                         discovery_results.update({
+#                             "ticker": llm_result.get("ticker", discovery_results["ticker"]),
+#                             "full_name": llm_result.get("company_name", discovery_results["full_name"]),
+#                             "cik": llm_result.get("cik", discovery_results["cik"]),
+#                             "confidence": llm_result.get("confidence", discovery_results["confidence"])
+#                         })
+#             except:
+#                 pass
+        
+#         # Update state with discovered information
+#         return {
+#             "messages": [AIMessage(content=f"Discovered company: {discovery_results['full_name']} ({discovery_results['ticker']}) with confidence {discovery_results['confidence']:.2f}")],
+#             "company": discovery_results["full_name"],
+#             "ticker": discovery_results["ticker"],
+#             "cik": discovery_results["cik"],
+#             "company_confidence": discovery_results["confidence"],
+#             "current_agent": "parser"
+#         }
+    
+#     return company_discoverer
+
+# Enhanced company discovery agent that uses LLM when confidence is low
 def create_company_discovery_agent(llm):
     """Agent to discover and validate company information"""
     def company_discoverer(state: FinancialAnalysisState):
@@ -325,6 +786,51 @@ def create_company_discovery_agent(llm):
         # Use discovery function
         discovery_results = discover_company_info(extracted_company)
         
+        # If low confidence or needs LLM help, use LLM to improve
+        if discovery_results["confidence"] < 0.7 or discovery_results.get("needs_llm_help", False):
+            # Enhanced prompt for LLM
+            llm_prompt = f"""Identify the correct stock ticker for this company query: "{extracted_company}"
+
+Common examples:
+- "State Street" or "State Street Corporation" → STT (State Street Corp)
+- "Snowflake" → SNOW (Snowflake Inc)
+- "Palantir" → PLTR (Palantir Technologies)
+- "ServiceNow" or "Service Now" → NOW (ServiceNow Inc)
+
+If this is a well-known public company, provide the correct ticker symbol.
+Return JSON with: {{"ticker": "XXX", "company_name": "Full Company Name", "confidence": 0.0-1.0}}
+
+Query: {extracted_company}"""
+            
+            response = llm.invoke([HumanMessage(content=llm_prompt)])
+            
+            try:
+                import re
+                json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+                if json_match:
+                    llm_result = json.loads(json_match.group())
+                    
+                    # Verify the LLM's suggestion with yfinance
+                    suggested_ticker = llm_result.get("ticker", "")
+                    if suggested_ticker and suggested_ticker != "UNKNOWN":
+                        try:
+                            stock = yf.Ticker(suggested_ticker)
+                            info = stock.info
+                            if info and 'longName' in info:
+                                discovery_results = {
+                                    "ticker": suggested_ticker,
+                                    "full_name": info.get('longName', llm_result.get("company_name", extracted_company)),
+                                    "cik": None,
+                                    "confidence": min(llm_result.get("confidence", 0.8), 0.9),
+                                    "method": "llm_assisted"
+                                }
+                        except:
+                            # LLM suggestion didn't verify, keep original but with LLM's name
+                            discovery_results["full_name"] = llm_result.get("company_name", discovery_results["full_name"])
+                            discovery_results["confidence"] = min(discovery_results["confidence"], 0.5)
+            except:
+                pass
+        
         # Get CIK if not found
         if not discovery_results.get("cik") and discovery_results.get("ticker"):
             cik = search_company_cik(
@@ -333,33 +839,15 @@ def create_company_discovery_agent(llm):
             )
             discovery_results["cik"] = cik
         
-        # If low confidence, try to improve with LLM
-        if discovery_results["confidence"] < 0.7:
-            prompt = COMPANY_DISCOVERY_PROMPT.format_messages(
-                query=state["query"],
-                extracted_company=extracted_company,
-                discovery_results=json.dumps(discovery_results),
-                messages=state["messages"]
-            )
-            
-            response = llm.invoke(prompt)
-            
-            try:
-                import re
-                json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
-                if json_match:
-                    llm_result = json.loads(json_match.group())
-                    
-                    # Update discovery results with LLM insights
-                    if llm_result.get("confidence", 0) > discovery_results["confidence"]:
-                        discovery_results.update({
-                            "ticker": llm_result.get("ticker", discovery_results["ticker"]),
-                            "full_name": llm_result.get("company_name", discovery_results["full_name"]),
-                            "cik": llm_result.get("cik", discovery_results["cik"]),
-                            "confidence": llm_result.get("confidence", discovery_results["confidence"])
-                        })
-            except:
-                pass
+        # Final validation - if ticker is suspicious (like "STATE" or "SNOWF"), mark low confidence
+        suspicious_patterns = [
+            len(discovery_results["ticker"]) == 5 and discovery_results["ticker"] == extracted_company.upper()[:5],
+            discovery_results["ticker"] in ["STATE", "SNOWF", "UNKNOWN"],
+            discovery_results["method"] == "fallback"
+        ]
+        
+        if any(suspicious_patterns):
+            discovery_results["confidence"] = min(discovery_results["confidence"], 0.3)
         
         # Update state with discovered information
         return {
@@ -372,7 +860,6 @@ def create_company_discovery_agent(llm):
         }
     
     return company_discoverer
-
 # Update the detect_query_intent function (keep existing)
 def detect_query_intent(query: str):
     """Detect the user's intent from their query"""
@@ -545,7 +1032,8 @@ def get_llms():
     
     return llms
 
-# Function to fetch Yahoo Finance data with support for any ticker
+
+
 def fetch_yahoo_finance_data(ticker: str, period: str):
     """Fetch financial data from Yahoo Finance for specific period"""
     
@@ -615,22 +1103,44 @@ def fetch_yahoo_finance_data(ticker: str, period: str):
             actual_date = None
             
             if not quarterly_financials.empty and start_date and end_date:
+                # First, try to find data within the requested date range
                 for col_date in quarterly_financials.columns:
                     if start_date <= col_date <= end_date:
                         target_data = col_date
                         actual_date = col_date
                         break
                 
-                # If no exact match, get the closest available data
-                if target_data is None and len(quarterly_financials.columns) > 0:
-                    # Get the most recent data before the requested period
-                    valid_dates = [d for d in quarterly_financials.columns if d <= end_date]
+                # If no exact match and we're looking for a full year (like "2024")
+                if target_data is None and period.startswith("FY"):
+                    # For full year requests, get ALL quarters in that year
+                    year_data = []
+                    for col_date in quarterly_financials.columns:
+                        if col_date.year == start_date.year:
+                            year_data.append(col_date)
+                    
+                    if year_data:
+                        # Use the most recent quarter from the requested year
+                        target_data = max(year_data)
+                        actual_date = target_data
+                        # Note: You could also aggregate all quarters here if needed
+                
+                # If still no match, get the most recent data WITHIN the requested year
+                if target_data is None:
+                    valid_dates = [d for d in quarterly_financials.columns 
+                                 if d >= start_date and d <= end_date]
                     if valid_dates:
                         target_data = max(valid_dates)
                         actual_date = target_data
                     else:
-                        target_data = quarterly_financials.columns[0]
-                        actual_date = target_data
+                        # Only get data from BEFORE the requested period, not after
+                        past_dates = [d for d in quarterly_financials.columns if d <= end_date]
+                        if past_dates:
+                            target_data = max(past_dates)
+                            actual_date = target_data
+                        else:
+                            # No suitable data found
+                            result["error"] = f"No financial data available for {period}"
+                            return result
             
             # Extract financial data for the target period
             if target_data is not None:
@@ -644,7 +1154,14 @@ def fetch_yahoo_finance_data(ticker: str, period: str):
                     
                     result["data_date"] = actual_date_str
                     result["data_period"] = get_actual_data_period(actual_date)
-                    result["period_match"] = (result["data_period"] == period)
+                    
+                    # Check if the actual data year matches requested year
+                    if period.startswith("FY") and actual_date:
+                        requested_year = int(period.replace("FY ", ""))
+                        actual_year = actual_date.year
+                        result["period_match"] = (requested_year == actual_year)
+                    else:
+                        result["period_match"] = (result["data_period"] == period)
                 
                 # Get financial data
                 if not quarterly_financials.empty:
@@ -675,17 +1192,6 @@ def fetch_yahoo_finance_data(ticker: str, period: str):
                         "capital_expenditures": cf_data.get("Capital Expenditures")
                     })
             
-            # If still no period data, try to get most recent
-            if result["data_period"] == "Unknown" and not quarterly_financials.empty:
-                latest_date = quarterly_financials.columns[0]
-                # Convert to string
-                if hasattr(latest_date, 'strftime'):
-                    result["data_date"] = latest_date.strftime('%Y-%m-%d')
-                else:
-                    result["data_date"] = str(latest_date)
-                result["data_period"] = get_actual_data_period(latest_date)
-                result["period_match"] = False
-                
         except Exception as e:
             st.warning(f"Could not fetch complete quarterly data for {ticker}: {str(e)}")
         
@@ -720,7 +1226,6 @@ def fetch_yahoo_finance_data(ticker: str, period: str):
             "ticker": ticker,
             "error": error_msg
         }
-
 # Function to fetch SEC EDGAR data using CIK
 def fetch_sec_edgar_data(company: str, period: str, cik: str = None):
     """Fetch financial data from SEC EDGAR API for specific period"""
@@ -1027,9 +1532,9 @@ Return JSON with ONLY these fields:
 - confidence_note: Only if company confidence < 0.5"""),
     MessagesPlaceholder(variable_name="messages"),
 ])
-# Update agent functions to include ticker parameter
+
 def create_parser_agent(llm):
-    """Document parsing agent"""
+    """Document parsing agent with improved market data handling"""
     def parser(state: FinancialAnalysisState) -> Dict:
         # Ensure we have all required state fields
         period_validation = state.get("period_validation", {
@@ -1037,6 +1542,9 @@ def create_parser_agent(llm):
             "actual": "Unknown",
             "matches": False
         })
+        
+        # Get market data
+        market_data = state.get("market_data", {})
         
         # Use custom encoder for JSON serialization
         prompt = PARSER_PROMPT.format_messages(
@@ -1047,7 +1555,7 @@ def create_parser_agent(llm):
             company_confidence=state.get("company_confidence", 0.5),
             period_validation=json.dumps(period_validation, cls=DateTimeEncoder),
             uploaded_content=state.get("uploaded_content", "No document uploaded"),
-            market_data=json.dumps(state.get("market_data", {}), cls=DateTimeEncoder),
+            market_data=json.dumps(market_data, cls=DateTimeEncoder),
             messages=state.get("messages", [])
         )
         
@@ -1059,34 +1567,48 @@ def create_parser_agent(llm):
             json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
             if json_match:
                 parsed_data = json.loads(json_match.group())
-            else:
-                # Use market data if available
-                market_data = state.get("market_data", {})
                 
-                # Provide default values and ensure no None values
-                default_values = {
-                    "revenue": 1000000000,
-                    "gross_profit": 400000000,
-                    "net_income": 100000000,
-                    "total_assets": 5000000000,
-                    "total_liabilities": 2000000000,
-                    "cash_flow": 150000000,
-                    "earnings_per_share": 5.0,
-                    "market_cap": 1000000000000,
-                    "data_period": market_data.get("data_period", state.get("period", "Unknown")),
-                    "data_quality_score": 50 if state.get("company_confidence", 0.5) >= 0.5 else 30
+                # Merge with market data if LLM missed some fields
+                for key in ["revenue", "gross_profit", "net_income", "total_assets", 
+                           "total_liabilities", "cash_flow", "earnings_per_share", "market_cap"]:
+                    if key in market_data and (key not in parsed_data or parsed_data[key] == 0):
+                        parsed_data[key] = market_data[key]
+            else:
+                raise ValueError("No JSON found in LLM response")
+                
+        except Exception as e:
+            print(f"Parser error: {str(e)}")
+            
+            # Better fallback - use market data if available
+            parsed_data = {}
+            
+            # First, try to use actual market data
+            if market_data:
+                # Map market data fields to parsed data fields
+                field_mapping = {
+                    "revenue": "revenue",
+                    "gross_profit": "gross_profit", 
+                    "net_income": "net_income",
+                    "total_assets": "total_assets",
+                    "total_liabilities": "total_liabilities",
+                    "operating_cash_flow": "cash_flow",
+                    "free_cash_flow": "cash_flow",  # Use free cash flow if operating not available
+                    "eps": "earnings_per_share",
+                    "market_cap": "market_cap"
                 }
                 
-                parsed_data = {}
-                for key, default in default_values.items():
-                    value = market_data.get(key)
-                    if value is not None and value != 0:
-                        parsed_data[key] = value
-                    else:
-                        parsed_data[key] = default
-        except Exception as e:
-            # Fallback data
-            parsed_data = {
+                for parsed_field, market_field in field_mapping.items():
+                    if market_field in market_data and market_data[market_field] is not None:
+                        parsed_data[parsed_field] = market_data[market_field]
+                
+                # Handle cash flow specially - prefer operating, then free
+                if "operating_cash_flow" in market_data and market_data["operating_cash_flow"] is not None:
+                    parsed_data["cash_flow"] = market_data["operating_cash_flow"]
+                elif "free_cash_flow" in market_data and market_data["free_cash_flow"] is not None:
+                    parsed_data["cash_flow"] = market_data["free_cash_flow"]
+            
+            # Only use defaults for fields not found in market data
+            default_values = {
                 "revenue": 1000000000,
                 "gross_profit": 400000000,
                 "net_income": 100000000,
@@ -1094,20 +1616,50 @@ def create_parser_agent(llm):
                 "total_liabilities": 2000000000,
                 "cash_flow": 150000000,
                 "earnings_per_share": 5.0,
-                "market_cap": 1000000000000,
-                "data_period": state.get("period", "Unknown"),
-                "data_quality_score": 30 if state.get("company_confidence", 0.5) < 0.5 else 50
+                "market_cap": 1000000000000
             }
+            
+            # Fill in any missing fields with defaults
+            for key, default in default_values.items():
+                if key not in parsed_data or parsed_data[key] is None or parsed_data[key] == 0:
+                    # Special handling for some fields
+                    if key == "gross_profit" and "revenue" in parsed_data and "gross_margin" in market_data:
+                        # Calculate gross profit from revenue and margin if available
+                        parsed_data[key] = parsed_data["revenue"] * (market_data["gross_margin"] / 100)
+                    elif key == "market_cap" and "price" in market_data and market_data["price"]:
+                        # Use actual market cap from market data if available
+                        parsed_data[key] = market_data.get("market_cap", default)
+                    else:
+                        parsed_data[key] = default
+            
+            # Always use the actual data period if available
+            parsed_data["data_period"] = market_data.get("data_period", state.get("period", "Unknown"))
+            
+            # Calculate data quality score based on how much real data we have
+            real_data_count = sum(1 for k, v in parsed_data.items() 
+                                 if k != "data_quality_score" and k != "data_period" 
+                                 and v != default_values.get(k))
+            total_fields = len(default_values)
+            data_quality = (real_data_count / total_fields) * 100
+            
+            # Adjust for company confidence
+            if state.get("company_confidence", 0.5) < 0.5:
+                data_quality *= 0.6
+            
+            parsed_data["data_quality_score"] = max(10, min(100, data_quality))
+        
+        # Log what data source was used
+        data_source = "LLM extraction" if 'json_match' in locals() else "Market data fallback"
+        print(f"Parser used: {data_source} for {state.get('company', 'Unknown')}")
         
         # Return the updated state
         return {
-            "messages": state.get("messages", []) + [AIMessage(content=f"Parsed financial data: {json.dumps(parsed_data, indent=2, cls=DateTimeEncoder)}")],
+            "messages": state.get("messages", []) + [AIMessage(content=f"Parsed financial data from {data_source}")],
             "parsed_data": parsed_data,
             "current_agent": "kpi_extractor"
         }
     
     return parser
-
 def create_kpi_agent(llm):
     """KPI calculation agent"""
     def kpi_extractor(state: FinancialAnalysisState):
@@ -1252,19 +1804,20 @@ def create_risk_agent(llm):
 # 3. Improved default insights generator
 def generate_improved_default_insights(state, query_intent, market_data=None):
     """Generate better default insights for investment decisions"""
-    company = state["company"]
+    company = state.get("company", "Unknown")
     ticker = state.get("ticker", "Unknown")
-    kpis = state["kpis"]
-    risk = state["risk_assessment"]
+    kpis = state.get("kpis", {})
+    risk = state.get("risk_assessment", {})
     parsed_data = state.get("parsed_data", {})
     
-    # Get market data
-    current_price = market_data.get('price', 0) if market_data else 0
-    pe_ratio = kpis.get('price_to_earnings', 0)
-    net_margin = kpis.get('net_margin', 0)
-    gross_margin = kpis.get('gross_margin', 0)
-    risk_score = risk.get('overall_risk_score', 0)
-    risk_level = risk.get('risk_level', 'Medium')
+    # Get market data with None handling
+    market_data = market_data or {}
+    current_price = market_data.get('price', 0) or 0
+    pe_ratio = kpis.get('price_to_earnings', 0) or 0
+    net_margin = kpis.get('net_margin', 0) or 0
+    gross_margin = kpis.get('gross_margin', 0) or 0
+    risk_score = risk.get('overall_risk_score', 0) or 0
+    risk_level = risk.get('risk_level', 'Medium') or 'Medium'
     
     if query_intent == "investment_decision":
         # Determine investment decision with better logic
@@ -1291,10 +1844,16 @@ def generate_improved_default_insights(state, query_intent, market_data=None):
         # Different recommendations for holders vs new investors
         recommendations = []
         if decision == "BUY":
-            recommendations = [
-                f"New investors: Consider entry {price_info}, start with partial position",
-                f"Current holders: Add on any dips below ${current_price * 0.95:.2f}" if current_price > 0 else "Current holders: Consider adding to position"
-            ]
+            if current_price > 0:
+                recommendations = [
+                    f"New investors: Consider entry {price_info}, start with partial position",
+                    f"Current holders: Add on any dips below ${current_price * 0.95:.2f}"
+                ]
+            else:
+                recommendations = [
+                    "New investors: Consider starting with partial position",
+                    "Current holders: Consider adding to position"
+                ]
         elif decision == "HOLD":
             recommendations = [
                 "Current holders: Maintain position, monitor quarterly earnings",
@@ -1306,10 +1865,16 @@ def generate_improved_default_insights(state, query_intent, market_data=None):
                 "New investors: Avoid - look for better opportunities"
             ]
         else:  # WAIT
-            recommendations = [
-                "Monitor next earnings report for margin improvements",
-                f"Set price alert at ${current_price * 0.85:.2f} for potential entry" if current_price > 0 else "Wait for clearer financial trends"
-            ]
+            if current_price > 0:
+                recommendations = [
+                    "Monitor next earnings report for margin improvements",
+                    f"Set price alert at ${current_price * 0.85:.2f} for potential entry"
+                ]
+            else:
+                recommendations = [
+                    "Monitor next earnings report for margin improvements",
+                    "Wait for clearer financial trends"
+                ]
         
         return {
             "query_specific_answer": answer,
@@ -1330,31 +1895,32 @@ def generate_improved_default_insights(state, query_intent, market_data=None):
             "key_concerns": risk.get("risk_factors", ["Monitor performance"])[:2],
             "recommendations": ["Review detailed financials", "Track quarterly progress"]
         }
-
 def create_insight_agent(llm):
     """Insight generation agent - optimized version"""
     def insight_generator(state: FinancialAnalysisState):
         # Detect query intent
         query_intent = detect_query_intent(state["query"])
         
-        # Extract key metrics for the prompt
-        parsed_data = state["parsed_data"]
-        kpis = state["kpis"]
-        risk_assessment = state["risk_assessment"]
+        # Extract key metrics for the prompt with None handling
+        parsed_data = state.get("parsed_data", {})
+        kpis = state.get("kpis", {})
+        risk_assessment = state.get("risk_assessment", {})
         market_data = state.get("market_data", {})
         
-        # Prepare simplified data for prompt
-        revenue = parsed_data.get('revenue', 0) / 1e6 if parsed_data.get('revenue') else 0
-        net_margin = kpis.get('net_margin', 0)
-        pe_ratio = kpis.get('price_to_earnings', 0)
-        risk_score = risk_assessment.get('overall_risk_score', 0)
-        current_price = market_data.get('price', 0)
+        # Prepare simplified data for prompt - handle None values
+        revenue = parsed_data.get('revenue', 0)
+        revenue = (revenue / 1e6 if revenue and revenue != 0 else 0)
+        
+        net_margin = kpis.get('net_margin', 0) or 0
+        pe_ratio = kpis.get('price_to_earnings', 0) or 0
+        risk_score = risk_assessment.get('overall_risk_score', 0) or 0
+        current_price = market_data.get('price', 0) or 0
         
         prompt = INSIGHT_PROMPT.format_messages(
-            company=state["company"],
+            company=state.get("company", "Unknown"),
             ticker=state.get("ticker", "Unknown"),
-            period=state["period"],
-            query=state["query"],
+            period=state.get("period", "Unknown"),
+            query=state.get("query", ""),
             query_intent=query_intent,
             response_mode=state.get("response_mode", "concise"),
             revenue=f"{revenue:.1f}",
@@ -1362,7 +1928,7 @@ def create_insight_agent(llm):
             pe_ratio=f"{pe_ratio:.1f}",
             risk_score=f"{risk_score:.0f}",
             current_price=f"{current_price:.2f}",
-            messages=state["messages"][-3:]  # Only last 3 messages to save tokens
+            messages=state.get("messages", [])[-3:]  # Only last 3 messages to save tokens
         )
         
         response = llm.invoke(prompt)
@@ -1578,8 +2144,8 @@ def create_financial_workflow():
     # Select LLMs for each agent (with fallbacks)
     # Use Gemini 1.5 Flash for company discovery as requested
     discovery_llm = llms.get("gemini-pro", llms.get("gpt-4", llms.get("groq-mixtral", list(llms.values())[0])))
-    parser_llm = llms.get("gemini-pro", llms.get("groq-mixtral", llms.get("gpt-4", list(llms.values())[0])))
-    kpi_llm = llms.get("gemini-pro", llms.get("groq-mixtral", llms.get("gpt-4", list(llms.values())[0])))
+    parser_llm = llms.get("groq-llama3", llms.get("gemini-pro", llms.get("gpt-4", list(llms.values())[0])))
+    kpi_llm = llms.get("groq-llama3", llms.get("gemini-pro", llms.get("gpt-4", list(llms.values())[0])))
     risk_llm = llms.get("groq-mixtral", llms.get("gpt-4", llms.get("claude-3", list(llms.values())[0])))
     insight_llm = llms.get("gpt-4", llms.get("groq-mixtral", llms.get("claude-3", list(llms.values())[0])))
     
@@ -1606,33 +2172,104 @@ def create_financial_workflow():
     
     return app, llms
 
-# Helper function to render chat message
-def render_chat_message(message_type, content, timestamp=None, message_data=None):
-    """Render a chat message with appropriate styling"""
+
+# Fixed render function with better styling
+def render_formatted_chat_message(message_type: str, content: str, timestamp: str = None, message_data: Dict = None):
+    """Render chat message with improved formatting"""
+    
+    # Clean the content first
+    cleaned_content = clean_response_text(content)
+    
     if message_type == "human":
-        st.markdown(f"""
-        <div style="display: flex; align-items: flex-start; margin-bottom: 1rem;">
-            <div style="background-color: #007bff; color: white; padding: 0.5rem; border-radius: 50%; margin-right: 0.5rem;">👤</div>
-            <div style="background-color: #f0f0f0; padding: 1rem; border-radius: 10px; max-width: 80%;">
-                <p style="margin: 0;">{content}</p>
-                {f'<small style="color: #666;">{timestamp}</small>' if timestamp else ''}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Create a container for the human message
+        with st.container():
+            col1, col2, col3 = st.columns([1, 10, 1])
+            with col1:
+                st.markdown("""
+                <div style="
+                    width: 40px;
+                    height: 40px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    color: white;
+                    font-weight: bold;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    margin-top: 5px;
+                ">👤</div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div style="
+                    background-color: #f7f8fa;
+                    padding: 0.75rem 1rem;
+                    border-radius: 18px;
+                    border-top-left-radius: 4px;
+                    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+                    margin-bottom: 0.5rem;
+                ">
+                    <div style="color: #1a1a1a; line-height: 1.5;">{cleaned_content}</div>
+                    {f'<div style="color: #8b8b8b; font-size: 0.75rem; margin-top: 0.25rem;">{timestamp}</div>' if timestamp else ''}
+                </div>
+                """, unsafe_allow_html=True)
+    
     else:  # AI message
-        st.markdown(f"""
-        <div style="display: flex; align-items: flex-start; margin-bottom: 1rem;">
-            <div style="background-color: #28a745; color: white; padding: 0.5rem; border-radius: 50%; margin-right: 0.5rem;">🤖</div>
-            <div style="background-color: #e8f5e9; padding: 1rem; border-radius: 10px; max-width: 80%;">
-                {content}
-                {f'<small style="color: #666;">{timestamp}</small>' if timestamp else ''}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Create a container for the AI message
+        with st.container():
+            col1, col2, col3 = st.columns([1, 10, 1])
+            with col1:
+                st.markdown("""
+                <div style="
+                    width: 40px;
+                    height: 40px;
+                    background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    color: white;
+                    font-weight: bold;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    margin-top: 5px;
+                ">🤖</div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                # Create a nice container for the AI response
+                with st.container():
+                    # st.markdown("""
+                    # <style>
+                    # .ai-message-container {
+                    #     background-color: #ffffff;
+                    #     padding: 1rem;
+                    #     border-radius: 18px;
+                    #     border-top-left-radius: 4px;
+                    #     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                    #     border: 1px solid #e8e8e8;
+                    #     margin-bottom: 0.5rem;
+                    # }
+                    # </style>
+                    # """, unsafe_allow_html=True)
+                    
+                    # # Use a div with class for the message content
+                    # st.markdown(f'<div class="ai-message-container">', unsafe_allow_html=True)
+                    
+                    # Render the cleaned content using Streamlit's markdown
+                    st.markdown(cleaned_content)
+                    
+                    # Add timestamp if available
+                    if timestamp:
+                        st.markdown(f'<div style="color: #8b8b8b; font-size: 0.75rem; margin-top: 0.5rem;">{timestamp}</div>', 
+                                   unsafe_allow_html=True)
+                    
+                    st.markdown('</div>', unsafe_allow_html=True)
         
-        # Add detailed analysis expander if available
+        # Add the detailed analysis expander if available
         if message_data and "full_results" in message_data:
-            with st.expander("📊 View Detailed Analysis"):
+            with st.expander("📊 View Detailed Analysis", expanded=False):
                 results = message_data["full_results"]
                 
                 # Tabs for different views
@@ -1680,7 +2317,6 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                     # KPI table
                     if kpis:
                         st.subheader("Key Performance Indicators")
-                        # Safe value extraction with None checks
                         kpi_rows = []
                         
                         roa = kpis.get('return_on_assets', 0)
@@ -1725,7 +2361,6 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                             }
                         ))
                         fig.update_layout(height=300)
-                        # Add unique key based on message timestamp
                         gauge_key = f"risk_gauge_{message_data.get('timestamp', '').replace(':', '').replace(' ', '')}"
                         st.plotly_chart(fig, use_container_width=True, key=gauge_key)
                         
@@ -1747,13 +2382,12 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                         col1, col2 = st.columns(2)
                         
                         with col1:
-                            # Margin comparison - with None checks
+                            # Margin comparison
                             margins = {
                                 'Gross Margin': kpis.get('gross_margin', 0),
                                 'Net Margin': kpis.get('net_margin', 0),
                                 'EBITDA Margin': kpis.get('ebitda_margin', 0)
                             }
-                            # Filter out None values
                             valid_margins = {k: v for k, v in margins.items() if v is not None}
                             
                             if valid_margins:
@@ -1769,7 +2403,6 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                                     color='Percentage',
                                     color_continuous_scale='RdYlGn'
                                 )
-                                # Add unique key based on message timestamp and chart type
                                 chart_key = f"margins_{message_data.get('timestamp', '').replace(':', '').replace(' ', '')}"
                                 st.plotly_chart(fig_margins, use_container_width=True, key=chart_key)
                         
@@ -1788,7 +2421,6 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                                     names=list(health_metrics.keys()),
                                     title="Asset vs Liability Distribution"
                                 )
-                                # Add unique key based on message timestamp and chart type
                                 chart_key = f"health_{message_data.get('timestamp', '').replace(':', '').replace(' ', '')}"
                                 st.plotly_chart(fig_health, use_container_width=True, key=chart_key)
                 
@@ -1803,8 +2435,6 @@ def render_chat_message(message_type, content, timestamp=None, message_data=None
                         "risk_assessment": results.get("risk_assessment", {}),
                         "data_sources": results.get("data_sources", [])
                     })
-
-
 def get_default_period():
     """Get the most recent likely available financial period"""
     current_date = datetime.now()
@@ -1980,10 +2610,10 @@ def main():
     with chat_container:
         for message in st.session_state.chat_history:
             if message["type"] == "human":
-                render_chat_message("human", message["content"], message.get("timestamp"))
+                render_formatted_chat_message("human", message["content"], message.get("timestamp"))
             else:
                 # Pass the entire message data to render function
-                render_chat_message("ai", message["content"], message.get("timestamp"), message)
+                render_formatted_chat_message("ai", message["content"], message.get("timestamp"), message)
     
     # Chat input with example queries
     st.markdown("### 💭 Your Question")
@@ -2147,7 +2777,7 @@ def main():
                             market_data.update(yahoo_data)
                             data_sources.append({
                                 "source": "Yahoo Finance",
-                                "period": yahoo_data.get("data_period") or yahoo_data.get("requested_period") or period,
+                                "period": yahoo_data.get("data_period", "Unknown"),
                                 "match": yahoo_data.get("period_match", False)
                             })
                 
@@ -2193,173 +2823,34 @@ def main():
                 insights = final_state.get("insights", {})
                 kpis = final_state.get("kpis", {})
                 parsed_data = final_state.get("parsed_data", {})
-                
+                risk_assessment = final_state.get("risk_assessment", {})
+
                 # Build response based on mode and intent
                 query_intent = final_state.get("query_intent", detect_query_intent(query))
-                response_parts = []
-                
-                if response_mode == "concise":
-                    # CONCISE MODE - Direct and actionable
-                    
-                    # Direct answer first
-                    if insights.get("query_specific_answer"):
-                        response_parts.append(f"**📌 {insights['query_specific_answer']}**")
-                    
-                    # Investment decision with emoji
-                    if insights.get("investment_decision") and query_intent == "investment_decision":
-                        decision = insights["investment_decision"]
-                        emoji = {"BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "WAIT": "⏸️"}.get(decision, "")
-                        response_parts.append(f"\n**Decision: {emoji} {decision}**")
-                    
-                    # Current price if available for investment queries
-                    if market_data.get('price') and query_intent == "investment_decision":
-                        response_parts.append(f"**Current Price: ${market_data['price']:.2f}**")
-                    
-                    # Risk level for investment/risk queries
-                    if query_intent in ["risk_assessment", "investment_decision"]:
-                        risk_data = final_state.get("risk_assessment", {})
-                        response_parts.append(f"**Risk Level:** {risk_data.get('risk_level', 'Unknown')} ({risk_data.get('overall_risk_score', 0):.0f}/100)")
-                    
-                    # Key metrics for investment decisions
-                    if query_intent == "investment_decision":
-                        response_parts.append("\n**Key Metrics:**")
-                        response_parts.append(f"• Net Margin: {kpis.get('net_margin', 0):.1f}%")
-                        response_parts.append(f"• P/E Ratio: {kpis.get('price_to_earnings', 0):.1f}")
-                        if market_data.get('52_week_high') and market_data.get('52_week_low'):
-                            response_parts.append(f"• 52-Week Range: ${market_data['52_week_low']:.2f} - ${market_data['52_week_high']:.2f}")
-                    
-                    # Key findings for document analysis
-                    elif query_intent == "document_analysis" and insights.get("key_strengths"):
-                        response_parts.append("\n**Key Findings:**")
-                        for finding in insights["key_strengths"][:3]:
-                            response_parts.append(f"• {finding}")
-                    
-                    # Concerns if any
-                    if insights.get("key_concerns") and len(insights["key_concerns"]) > 0:
-                        response_parts.append("\n**Concerns:**")
-                        for concern in insights["key_concerns"][:2]:
-                            response_parts.append(f"• {concern}")
-                    
-                    # Recommendations - now investor-focused
-                    if insights.get("recommendations"):
-                        response_parts.append("\n**What to do:**")
-                        for rec in insights["recommendations"][:2]:
-                            response_parts.append(f"• {rec}")
-                    
-                    # Add volatility warning for certain stocks
-                    volatile_stocks = ['TSLA', 'GME', 'AMC', 'COIN', 'RIOT', 'MARA', 'PLTR', 'NIO', 'RIVN']
-                    if ticker in volatile_stocks and query_intent == "investment_decision":
-                        response_parts.append("\n⚠️ *Note: This stock is known for high volatility*")
-                    
-                    # Confidence note if needed
-                    if insights.get("confidence_note"):
-                        response_parts.append(f"\n⚠️ {insights['confidence_note']}")
-                    
-                else:
-                    # DETAILED MODE - Professional analysis
-                    
-                    # Executive summary with proper formatting
-                    if insights.get("executive_summary"):
-                        response_parts.append(insights["executive_summary"])
-                    else:
-                        # Build a proper executive summary
-                        response_parts.append(f"## {company} ({ticker}) Financial Analysis\n")
-                        
-                        if query_intent == "investment_decision":
-                            response_parts.append("### Investment Overview")
-                            if market_data.get('price'):
-                                response_parts.append(f"**Current Price:** ${market_data['price']:.2f}")
-                            if market_data.get('market_cap'):
-                                response_parts.append(f"**Market Cap:** ${market_data['market_cap']/1e9:.1f}B")
-                            if market_data.get('52_week_high') and market_data.get('52_week_low'):
-                                current = market_data.get('price', 0)
-                                high = market_data['52_week_high']
-                                low = market_data['52_week_low']
-                                pct_from_high = ((current - high) / high * 100) if high > 0 else 0
-                                response_parts.append(f"**52-Week Range:** ${low:.2f} - ${high:.2f} (Currently {pct_from_high:+.1f}% from high)")
-                    
-                    # Detailed answer
-                    if insights.get("query_specific_answer"):
-                        response_parts.append(f"\n### 📊 Analysis\n{insights['query_specific_answer']}")
-                    
-                    # Investment decision with detailed justification
-                    if insights.get("investment_decision") and query_intent == "investment_decision":
-                        decision = insights["investment_decision"]
-                        emoji = {"BUY": "🟢", "HOLD": "🟡", "SELL": "🔴", "WAIT": "⏸️"}.get(decision, "")
-                        response_parts.append(f"\n### {emoji} Investment Decision: {decision}")
-                        
-                        # Add detailed reasoning based on metrics
-                        if decision == "BUY":
-                            response_parts.append("Strong fundamentals support accumulation at current levels.")
-                        elif decision == "HOLD":
-                            response_parts.append("Mixed signals suggest maintaining current position while monitoring developments.")
-                        elif decision == "SELL":
-                            response_parts.append("Risk factors outweigh potential rewards at current valuation.")
-                        else:
-                            response_parts.append("Unclear trends warrant patience before taking a position.")
-                    
-                    # Financial metrics table
-                    if query_intent in ["investment_decision", "general_analysis"]:
-                        response_parts.append("\n### 📈 Financial Metrics")
-                        response_parts.append(f"• **Revenue:** ${parsed_data.get('revenue', 0)/1e6:.1f}M")
-                        response_parts.append(f"• **Gross Margin:** {kpis.get('gross_margin', 0):.1f}%")
-                        response_parts.append(f"• **Net Margin:** {kpis.get('net_margin', 0):.1f}%")
-                        response_parts.append(f"• **P/E Ratio:** {kpis.get('price_to_earnings', 0):.1f}")
-                        response_parts.append(f"• **ROE:** {kpis.get('return_on_equity', 0):.1f}%")
-                        response_parts.append(f"• **Debt/Equity:** {kpis.get('debt_to_equity', 0):.2f}")
-                    
-                    # Technical analysis if available
-                    if insights.get("technical_analysis"):
-                        response_parts.append(f"\n### 📊 Technical Analysis\n{insights['technical_analysis']}")
-                    
-                    # Strengths and concerns
-                    if insights.get("key_strengths") or insights.get("key_concerns"):
-                        response_parts.append("\n### 💪 Strengths vs ⚠️ Concerns")
-                        
-                        if insights.get("key_strengths"):
-                            response_parts.append("\n**Strengths:**")
-                            for strength in insights["key_strengths"]:
-                                response_parts.append(f"• {strength}")
-                        
-                        if insights.get("key_concerns"):
-                            response_parts.append("\n**Concerns:**")
-                            for concern in insights["key_concerns"]:
-                                response_parts.append(f"• {concern}")
-                    
-                    # Strategic recommendations
-                    if insights.get("recommendations"):
-                        response_parts.append("\n### 🎯 Investment Strategy")
-                        for i, rec in enumerate(insights["recommendations"], 1):
-                            response_parts.append(f"{i}. {rec}")
-                    
-                    # Market position and outlook
-                    if insights.get("market_position"):
-                        response_parts.append(f"\n### 🏆 Market Position\n{insights['market_position']}")
-                    
-                    if insights.get("future_outlook"):
-                        response_parts.append(f"\n### 🔮 Future Outlook\n{insights['future_outlook']}")
-                    
-                    # Risk warning for volatile stocks
-                    volatile_stocks = ['TSLA', 'GME', 'AMC', 'COIN', 'RIOT', 'MARA', 'PLTR', 'NIO', 'RIVN']
-                    if ticker in volatile_stocks and query_intent == "investment_decision":
-                        response_parts.append("\n### ⚠️ Volatility Warning")
-                        response_parts.append(f"{ticker} is known for significant price swings. Size positions accordingly and use stop-losses.")
-                    
-                    # Confidence note if needed
-                    if insights.get("confidence_note"):
-                        response_parts.append(f"\n### ⚠️ Important Note\n{insights['confidence_note']}")
-                
-                # Add data source info
-                if data_sources:
-                    response_parts.append("\n\n📊 *Data sources used:*")
+
+                # Use the new formatting function
+                ai_response = format_response_for_display(
+                    response_parts=[],  # Not needed with new formatter
+                    response_mode=response_mode,
+                    query_intent=query_intent,
+                    company=company,
+                    ticker=ticker,
+                    insights=insights,
+                    kpis=kpis,
+                    risk_assessment=risk_assessment,
+                    market_data=market_data,
+                    parsed_data=parsed_data
+                )
+
+                # Add data source info to the response
+                if data_sources or pdf_chunks_info:
+                    data_source_parts = ["\n\n📊 *Data sources used:*"]
                     for source in data_sources:
-                        response_parts.append(f"• {source['source']} - {source['period']}")
-                
-                if pdf_chunks_info:
-                    response_parts.append(f"• Uploaded PDF {pdf_chunks_info}")
-                
-                # Combine response
-                ai_response = "\n".join(response_parts)
+                        data_source_parts.append(f"• {source['source']} - {source['period']}")
+                    if pdf_chunks_info:
+                        data_source_parts.append(f"• Uploaded PDF {pdf_chunks_info}")
+                    
+                    ai_response += "\n".join(data_source_parts)
                 
                 # Add AI response to chat with full results embedded
                 st.session_state.chat_history.append({
