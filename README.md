@@ -203,10 +203,6 @@ The system includes comprehensive error handling:
 - Microservices architecture for better scalability
 - Enhanced monitoring and logging capabilities
 
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on how to submit pull requests, report issues, and contribute to the project.
-
 ## 🙏 Acknowledgments
 
 - OpenAI for GPT-4 and embedding models
