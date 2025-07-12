@@ -207,10 +207,6 @@ The system includes comprehensive error handling:
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on how to submit pull requests, report issues, and contribute to the project.
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 🙏 Acknowledgments
 
 - OpenAI for GPT-4 and embedding models
@@ -218,15 +214,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Groq for high-speed inference infrastructure
 - Yahoo Finance and SEC EDGAR for financial data APIs
 - The open-source community for the underlying frameworks
-
-## 📞 Support
-
-For support, please:
-1. Check the [documentation](docs/)
-2. Search existing [issues](https://github.com/your-username/finsight/issues)
-3. Create a new issue if needed
-4. Join our [Discord community](https://discord.gg/finsight)
-
----
 
 **Disclaimer**: FinSight is designed for educational and research purposes. All financial analysis and investment recommendations should be verified with qualified financial professionals before making investment decisions.
