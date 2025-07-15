@@ -1,5 +1,3 @@
-# FINSIGHT
-
 # FinSight - Multi-Agent Financial Analysis Platform
 
 FinSight is a sophisticated financial analysis platform that leverages multiple Large Language Models (LLMs) in a coordinated multi-agent architecture to provide real-time financial insights. The system processes natural language queries about publicly traded companies and delivers comprehensive analysis including investment recommendations, risk assessments, and financial metrics visualization.
